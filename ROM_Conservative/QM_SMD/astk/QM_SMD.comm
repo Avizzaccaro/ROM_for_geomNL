@@ -1,0 +1,778 @@
+#########################################
+###  CODE_ASTER INPUT FILE             ##
+#########################################
+
+
+import numpy as np
+import scipy.io as sio
+from math import *
+
+DEBUT(PAR_LOT='NON')
+      
+
+# The only parameters to change in the body of this file are highlighted by #**(i) i=1:8
+
+
+# ENTER THE ABSOLUTE PATH WHERE YOU WANT TO SAVE 
+# THE .mat FILE WITH REDUCED SYSTEM TENSORS			#**(1)
+output_filename='/home/av3116/Downloads/CodeBetaTestCons/QM_SMD/astk/mapping_and_red_dyn.mat'
+
+# Tolerances for linear solver 					#**(2)
+tol_quad=1.E-5
+tol_cubic=1.E-5
+tol_cubic_ir=2.E-5
+
+
+#######################################################
+########	Parameters of the ROM		#######
+#######################################################
+
+
+Master_Modes=[3,7,11]						#**(3) master modes you want to study (from smaller to higher)
+q=[0.02]*3							#**(4) amplitude of imposed displacement for each mode
+int_res=np.array([						#**(5) add nontrivial third order int res: +-w_i +-w_j +-w_k = +-w_p
+		[1,1,1,2],
+		#[1,1,1,3],
+		#[1,1,2,3],
+		])						
+
+# Example:
+# if one wants to study Master_Modes [1,2,5]
+# and there is an internal resonance in the form:
+# w_1 + w_2 + w_2 = w_5
+# then the row of int_res must be:
+# [1,2,2,3]
+# because the fifth mode is the number 3 in Master_Modes!
+
+
+#######################################################
+####		Model Setup			#######
+#######################################################
+
+mesh = LIRE_MAILLAGE(FORMAT='MED',
+	UNITE=20);						#**(6) number of mesh input in astk
+
+
+model = AFFE_MODELE(
+	AFFE=_F(MODELISATION=('3D', ),
+	PHENOMENE='MECANIQUE',TOUT='OUI'),
+	MAILLAGE=mesh);
+
+
+
+mater = DEFI_MATERIAU(ELAS=_F(					#**(7) material properties
+	E=210e+09,
+	NU=0.3,
+	RHO=8750));
+
+fieldmat = AFFE_MATERIAU(
+	AFFE=_F(MATER=(mater, ),TOUT='OUI'),
+	MODELE=model);
+
+
+
+#######################################################
+####		Matrix Assembling		#######
+#######################################################
+
+BC = AFFE_CHAR_MECA(DDL_IMPO=(_F(DX=0.0,DY=0.0,DZ=0.0,GROUP_MA=('clamped_faces')),
+					),MODELE=model);
+
+
+ASSEMBLAGE(MODELE=model,
+	CHARGE=BC,
+	CHAM_MATER=fieldmat,
+	NUME_DDL=CO('nddl'),
+	MATR_ASSE=(
+		_F(MATRICE=CO("K"),OPTION='RIGI_MECA'),
+		_F(MATRICE=CO("M"),OPTION='MASS_MECA'),
+	))
+
+
+
+#######################################################
+####		Dummy Fields			#######
+#######################################################
+
+# initial dummy displacement
+U = CREA_CHAMP(AFFE=_F(NOM_CMP=('DX', 'DY', 'DZ'),TOUT='OUI',VALE=(0.0, 0.0, 0.0)),
+	MAILLAGE=mesh,
+	OPERATION='AFFE',
+	TYPE_CHAM='NOEU_DEPL_R');
+
+# initial dummy stress
+SIGP = CREA_CHAMP(AFFE=_F(NOM_CMP=('SIXX', 'SIYY', 'SIZZ', 'SIXY', 'SIYZ', 'SIXZ'),
+	TOUT='OUI',VALE=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+	MODELE=model,
+	OPERATION='AFFE',
+	TYPE_CHAM='ELGA_SIEF_R');
+
+# initial dummy stress variation
+VARIP = CREA_CHAMP(AFFE=_F(NOM_CMP=('V1', ),TOUT='OUI',VALE=(0.0, )),
+	MODELE=model,
+	OPERATION='AFFE',
+	TYPE_CHAM='ELGA_VARI_R');
+
+RAMPE=DEFI_FONCTION(NOM_PARA='INST',
+	VALE=(0.0,0.0,1.0,1.0,),
+	PROL_DROITE='LINEAIRE',
+	PROL_GAUCHE='LINEAIRE',);
+
+LIST=DEFI_LIST_REEL(DEBUT=0.0,
+	INTERVALLE=_F(JUSQU_A=1.0,
+	NOMBRE=1,),);
+
+
+
+#######################################################
+####		Functions to extract Forces	#######
+#######################################################
+
+def COMPUTE_F(DU,F,p,deformation_type,dof_handler=nddl):
+	
+	# CALCUL performs a static analysis: input DU, output nodal forces
+	# deformation_type: 'GROT_GDEP' for nonlinear behaviour, 'PETIT' for linear
+	# dof organised by default as nddl from standard assemblage
+	# F_TABLE is a concept de type : table_container
+	F_TABLE = CALCUL(CHAM_MATER=fieldmat,COMPORTEMENT=_F(DEFORMATION=deformation_type,RELATION='ELAS'),
+		DEPL=U,
+		EXCIT=_F(CHARGE=BC),
+		INCREMENT=_F(LIST_INST=LIST,NUME_ORDRE=1),
+		INCR_DEPL=DU,
+		INFO=1,
+		MODELE=model,
+		OPTION=('COMPORTEMENT', 'FORC_INTE_ELEM', 'MATR_TANG_ELEM', 'FORC_NODA_ELEM'),
+		SIGM=SIGP,
+		VARI=VARIP);
+	
+	# EXTR_TABLE extract the results from the table F_TABLE
+	# F_EXTR is a concept de type : vect_elem_depl_r
+	F_EXTR = EXTR_TABLE(FILTRE=_F(NOM_PARA='NOM_OBJET',
+		VALE_K='FORC_NODA_ELEM'),
+		NOM_PARA='NOM_SD',
+		TABLE=F_TABLE,
+		TYPE_RESU='VECT_ELEM_DEPL_R');
+	
+	# ASSE_VECTEUR assemble the nodal forces to a champ
+	# F[p] is a concept de type : cham_no_sdaster
+	F[p]=ASSE_VECTEUR(NUME_DDL=nddl,VECT_ELEM=F_EXTR);
+	
+	DETRUIRE(CONCEPT = _F (NOM = F_TABLE))
+	DETRUIRE(CONCEPT = _F (NOM =F_EXTR))
+
+
+
+def EXTRACT_F_NL(DU,F_NL,case):
+	
+	Fg=dict()
+	
+	# call linear forces due to DU
+	# Fg['lin']=
+	COMPUTE_F(DU,Fg,'lin','PETIT')
+	
+	# call total (lin+nlin) forces due to DU
+	# Fg['tot']=
+	COMPUTE_F(DU,Fg,'tot','GROT_GDEP')
+	
+	# subtract linear to total
+	F_NL[case]=CREA_CHAMP(COMB=(
+		_F(CHAM_GD=Fg['lin'],COEF_R=-1),
+		_F(CHAM_GD=Fg['tot'],COEF_R=1)),
+		OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	DETRUIRE(CONCEPT = _F (NOM = DU))
+	DETRUIRE(CONCEPT = _F (NOM = Fg['lin']))
+	DETRUIRE(CONCEPT = _F (NOM = Fg['tot']))
+
+
+
+
+
+#######################################################
+########	Extract Modes and Frequencies	#######
+#######################################################
+
+
+N_modes=len(Master_Modes)
+
+EigenModes = [None]*(N_modes)			# eigenvectors in python format
+MdotEigenModes = [None]*(N_modes)		# mass matrix dot eigenvectors in python format
+PHI=[None]*(N_modes)				# eigenvectors in code_aster format
+MPHI=[None]*(N_modes)				# mass matrix dot eigenvectors in code_aster format
+CSTR=[None]*(N_modes)				# char meca that will be later used as a constraint
+
+modes = CALC_MODES(CALC_FREQ=_F(NMAX_FREQ=Master_Modes[-1]),
+	MATR_MASS=M,
+	MATR_RIGI=K,
+	NORM_MODE=_F(NORME='MASS_GENE'),
+	OPTION='PLUS_PETITE',
+	TYPE_RESU='DYNAMIQUE',
+	VERI_MODE=_F(STOP_ERREUR='NON',SEUIL=1.E-5))
+ 
+               
+# extrating natural frequencies of the master modes only
+TFREQ=RECU_TABLE(CO=modes,NOM_PARA='FREQ');
+
+t_freq = TFREQ.EXTR_TABLE().Array('NUME_ORDRE','FREQ')
+
+"""
+# If one wants to check for possible internal resonances before running the script
+print('check int res')
+print(np.array(t_freq)/t_freq[2])
+FIN(INFO_RESU='NON')
+"""
+
+omega=np.zeros([N_modes,])
+for i in range(N_modes):
+	omega[i] = 2*pi*t_freq[Master_Modes[i]-1][1]
+
+
+# extracting FM
+for i in range(N_modes):
+	# extract selected internal modes and store them on FM
+	PHI[i] = CREA_CHAMP(NOM_CHAM='DEPL',
+		NUME_MODE=Master_Modes[i],
+		OPERATION='EXTR',
+		RESULTAT=modes,
+		TYPE_CHAM='NOEU_DEPL_R')
+	
+	MPHI[i] = PROD_MATR_CHAM(MATR_ASSE=M, CHAM_NO=PHI[i],);
+	CSTR[i] = AFFE_CHAR_MECA(MODELE=model,INFO=1,
+		LIAISON_CHAMNO=_F(
+			CHAM_NO=MPHI[i],COEF_IMPO = 0.0) ,);
+	EigenModes[i]=PHI[i].EXTR_COMP(topo=1).valeurs
+	MdotEigenModes[i]=MPHI[i].EXTR_COMP(topo=1).valeurs
+
+
+
+N_dofs=len(EigenModes[0])
+
+
+"""
+### saves the MODE tangent vector as .rmed for visualisation in ParaVis
+RESU = CREA_RESU (OPERATION='AFFE',TYPE_RESU= 'MULT_ELAS', NOM_CHAM='DEPL',AFFE=(
+	_F( CHAM_GD= PHI[0], NOM_CAS= 'CAS1'),),);
+
+for i in range(1,N_modes):
+	RESU = CREA_RESU (reuse = RESU,OPERATION='AFFE',TYPE_RESU= 'MULT_ELAS', NOM_CHAM='DEPL',AFFE=(
+			_F( CHAM_GD= PHI[i], NOM_CAS= 'CAS1'),),);
+
+IMPR_RESU(FORMAT='MED',RESU=_F(INFO_MAILLAGE='OUI',RESULTAT=RESU,NOM_CHAM=('DEPL')),UNITE=81)
+
+FIN()
+"""
+###############################################################################
+########	Extract G(Vi,Vj) and H(phi_i,phi_j,phi_k)	#######
+########	from nonlinear forces computations as in Step method	#######
+###############################################################################
+
+#	Each DU imposed displacement is a linear combination of modes (FM)
+#	by their selected modal amplitudes q
+
+#	DU_i = Vi * Ai
+#	DU_j = Vj * AMPq[j]
+#	DU_k = Vk * Ak
+#	DU = +- DU_i +- DU_j +- DU_k
+
+#	The +- sign are the parameter to play with to extract the desired G and H component
+
+#########################################
+#	First Loop of Step method:	#
+#########################################
+
+#	G(Vi,Vi)		= G[i,i] 	= (  F_NL(+DU_i) + F_NL(-DU_i)  )/(2 Ai**2)
+
+#	H(Vi,Vi,Vi)		= H[i,i,i]	= (  F_NL(+DU_i) - F_NL(-DU_i)  )/(2 Ai**3)
+
+
+def Combination_i(current,quadratic,*cubic):
+	
+	(Vi,Ai)=current
+	
+	F_NL=dict()
+	DU=dict()
+	
+	# create displacement DU['p'] = +DU_i
+	DU['p'] = CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	Vi,		COEF_R=+Ai),
+		),
+		INFO=1,OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	# create displacement DU['m'] = -DU_i
+	DU['m'] = CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	Vi,		COEF_R=-Ai),
+		),	
+		INFO=1,OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	# Extract the nonlinear forces generated by +DU_i
+	EXTRACT_F_NL(DU['p'],F_NL,'p')
+	
+	# Extract the nonlinear forces generated by -DU_i
+	EXTRACT_F_NL(DU['m'],F_NL,'m')
+	
+	
+	G=quadratic[0]
+	IdG=quadratic[1]
+	# Isolate quadratic part
+	G[IdG]=CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	F_NL['p'],	COEF_R=	+1/(2.0*Ai**2)),
+		_F(CHAM_GD=	F_NL['m'],	COEF_R=	+1/(2.0*Ai**2)),
+		),
+		OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	
+	if len(cubic)>0:
+		
+		H=cubic[0]
+		IdH=cubic[1]		
+		# Isolate cubic part
+		H[IdH]=CREA_CHAMP(COMB=(
+			_F(CHAM_GD=	F_NL['p'],	COEF_R=+1/(2.0*Ai**3)),
+			_F(CHAM_GD=	F_NL['m'],	COEF_R=-1/(2.0*Ai**3)),
+			),
+			OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	DETRUIRE(CONCEPT = _F (NOM = F_NL['p']))
+	DETRUIRE(CONCEPT = _F (NOM = F_NL['m']))
+
+
+#########################################
+#	Second Loop			#
+#########################################
+
+#	G(Vi,Vj)		= G[i,j] 	= (  F_NL(+DU_i+DU_j) + F_NL(-DU_i-DU_j)  )/(4 Ai Aj)	
+#							- (  G[i,i] Ai**2 + G[j,j] Aj**2  )/(2 Ai Aj)
+
+#	H(Vi,Vi,Vj)	= H[i,i,j]	= ( -F_NL(+DU_i-DU_j) - F_NL(-DU_i-DU_j)  )/(6 Ai**2 Aj)
+#							+ (  G[i,i] Ai**2 + G[j,j] Aj**2  )/(3 Ai**2 Aj)
+#							- (  H[j,j,j] Aj**3 )/(3 Ai**2 Aj)
+
+#	H(Vi,Vj,Vj)	= H[i,j,j]	= ( +F_NL(+DU_i-DU_j) + F_NL(+DU_i+DU_j)  )/(6 Ai Aj**2)
+#							- (  G[i,i] Ai**2 + G[j,j] Aj**2  )/(3 Ai Aj**2)
+#							- (  H[i,i,i] Aj**2 )/(3 Ai Aj**2)
+
+
+def Combination_ij(current,previous,quadratic,*cubic):
+	
+	(Vi,Ai,Vj,Aj)=current
+	(Gii,Gjj,Hiii,Hjjj)=previous
+	
+	F_NL=dict()
+	DU=dict()
+	
+	# create displacement DU['pp'] = +DU_i+DU_j
+	DU['pp'] = CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	Vi,		COEF_R=+Ai),
+		_F(CHAM_GD=	Vj,		COEF_R=+Aj),
+		),
+		INFO=1,OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	# create displacement DU['mm'] = -DU_i-DU_j
+	DU['mm'] = CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	Vi,		COEF_R=-Ai),
+		_F(CHAM_GD=	Vj,		COEF_R=-Aj),
+		),
+		INFO=1,OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	# create displacement DU['pm'] = +DU_i-DU_j
+	DU['pm'] = CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	Vi,		COEF_R=+Ai),
+		_F(CHAM_GD=	Vj,		COEF_R=-Aj),
+		),
+		INFO=1,OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	# Extract the nonlinear forces generated by +DU_i+DU_j
+	EXTRACT_F_NL(DU['pp'],F_NL,'pp')
+	
+	# Extract the nonlinear forces generated by -DU_i-DU_j
+	EXTRACT_F_NL(DU['mm'],F_NL,'mm')
+	
+	# Extract the nonlinear forces generated by +DU_i-DU_j
+	EXTRACT_F_NL(DU['pm'],F_NL,'pm')
+	
+	G=quadratic[0]
+	IdG=quadratic[1]
+	# Isolate quadratic part
+	G[IdG]=CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	F_NL['pp'],	COEF_R=+1/(4.0*Ai*Aj)),
+		_F(CHAM_GD=	F_NL['mm'],	COEF_R=+1/(4.0*Ai*Aj)),
+		_F(CHAM_GD=	   Gii,		COEF_R=-Ai**2/(2.0*Ai*Aj)),
+		_F(CHAM_GD=	   Gjj,		COEF_R=-Aj**2/(2.0*Ai*Aj)),
+		),
+		OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	if len(cubic)>0:
+		
+		H=cubic[0]
+		IdH1=cubic[1]
+		IdH2=cubic[2]
+		# Isolate cubic part iij
+		H[IdH1]=CREA_CHAMP(COMB=(
+			_F(CHAM_GD=	F_NL['pm'],		COEF_R=-1/(6.0*Ai**2*Aj)),
+			_F(CHAM_GD=	F_NL['mm'],		COEF_R=-1/(6.0*Ai**2*Aj)),
+			_F(CHAM_GD=	Gii,			COEF_R=+Ai**2/(3.0*Ai**2*Aj)),
+			_F(CHAM_GD=	Gjj,			COEF_R=+Aj**2/(3.0*Ai**2*Aj)),
+			_F(CHAM_GD=	Hjjj,			COEF_R=-Aj**3/(3.0*Ai**2*Aj)),
+			),
+			OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+		# Isolate cubic part ijj
+		H[IdH2]=CREA_CHAMP(COMB=(
+			_F(CHAM_GD=	F_NL['pp'],		COEF_R=+1/(6.0*Ai*Aj**2)),
+			_F(CHAM_GD=	F_NL['pm'],		COEF_R=+1/(6.0*Ai*Aj**2)),
+			_F(CHAM_GD=	Gii,			COEF_R=-Ai**2/(3.0*Ai*Aj**2)),
+			_F(CHAM_GD=	Gjj,			COEF_R=-Aj**2/(3.0*Ai*Aj**2)),
+			_F(CHAM_GD=	Hiii,			COEF_R=-Ai**3/(3.0*Ai*Aj**2)),
+			),
+			OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	DETRUIRE(CONCEPT = _F (NOM = F_NL['pp']))
+	DETRUIRE(CONCEPT = _F (NOM = F_NL['mm']))
+	DETRUIRE(CONCEPT = _F (NOM = F_NL['pm']))
+
+
+
+
+#########################################
+#	Third Loop			#
+#########################################
+
+#  H(Vi,Vj,Vk)	= H[i,j,k] = ( +F_NL(+DU_i+DU_j+DU_k) )/(6 Ai Aj Ak)
+#					- (  G[i,i] Ai**2 + G[j,j] Aj**2  + G[k,k] Ak**2  )/(6 Ai Aj Ak)
+#					- (  G[i,j] Ai Aj + G[j,k] Aj Ak  + G[i,k] Ak Ai  )/(3 Ai Aj Ak)
+#					- ( H[i,i,i] Ai**3 + H[j,j,j] Aj**3 + H[k,k,k] Ak**3 )/(6 Ai Aj Ak)
+#					- ( H[i,i,j] Ai**2 Aj + H[i,j,j] Ai Aj**2 )/(2 Ai Aj Ak)
+#					- ( H[j,j,k] Aj**2 Ak + H[j,k,k] Aj Ak**2 )/(2 Ai Aj Ak)
+#					- ( H[i,i,k] Ai**2 Ak + H[i,k,k] Ai Ak**2 )/(2 Ai Aj Ak)
+
+
+def Combination_ijk(current,previous,cubic):
+	
+	(Vi,Ai,Vj,Aj,Vk,Ak)=current
+	(Gii,Gjj,Gkk,Gij,Gjk,Gik,Hiii,Hjjj,Hkkk,Hiij,Hjjk,Hiik,Hijj,Hjkk,Hikk)=previous
+	
+	
+	F_NL=dict()
+	DU=dict()
+	
+	# create displacement DU['pp'] = +DU_i+DU_j+DU_k
+	DU['ppp'] = CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	Vi,		COEF_R=+Ai),
+		_F(CHAM_GD=	Vj,		COEF_R=+Aj),
+		_F(CHAM_GD=	Vk,		COEF_R=+Ak),
+		),
+		INFO=1,OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	# Extract the nonlinear forces generated by +DU_i+DU_j+DU_k
+	EXTRACT_F_NL(DU['ppp'],F_NL,'ppp')
+	
+	H=cubic[0]
+	IdH=cubic[1]
+	# Isolate cubic part ijk
+	H[IdH]=CREA_CHAMP(COMB=(
+		_F(CHAM_GD=	F_NL['ppp'],		COEF_R=1/(6.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Gii,			COEF_R=-Ai**2/(6.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Gjj,			COEF_R=-Aj**2/(6.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Gkk,			COEF_R=-Ak**2/(6.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Gij,			COEF_R=-Ai*Aj/(3.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Gjk,			COEF_R=-Aj*Ak/(3.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Gik,			COEF_R=-Ai*Ak/(3.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hiii,			COEF_R=-Ai**3/(6.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hjjj,			COEF_R=-Aj**3/(6.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hkkk,			COEF_R=-Ak**3/(6.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hiij,			COEF_R=-Ai**2*Aj/(2.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hjjk,			COEF_R=-Aj**2*Ak/(2.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hiik,			COEF_R=-Ai**2*Ak/(2.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hijj,			COEF_R=-Ai*Aj**2/(2.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hjkk,			COEF_R=-Aj*Ak**2/(2.0*Ai*Aj*Ak)),
+		_F(CHAM_GD=	Hikk,			COEF_R=-Ai*Ak**2/(2.0*Ai*Aj*Ak)),
+		),
+		OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+	
+	DETRUIRE(CONCEPT = _F (NOM = F_NL['ppp']))
+
+
+
+def Id(*list_of_indexes):
+	# Id(1,2,3)  returns '123'
+	# Id(1,2,12) returns '12C'
+	# max number of modes 15
+	# if one needs more than 15 modes
+	# one just appends another digit to the list of extra symbols
+	case=''
+	extra_symbols=	('A','B','C','D','E','F')
+	#		(=10,=11,=12,=13,=14,=15)
+	for i in list_of_indexes:
+		if i<10:# digits from 0 to 9: each index must occupy one single space!
+			case=case+str(i)
+		else:# digits higher than 9 becomes extra symbols
+			case=case+extra_symbols[i-10]
+	return case
+
+
+
+def pack_i(G,H,i):
+	return(G[Id(i,i)],H[Id(i,i,i)])
+
+
+
+def pack_ij(G,H,i,j):
+	return(G[Id(i,j)],H[Id(i,i,j)],H[Id(i,j,j)])
+
+
+
+def pack_previous_ij(G,H,i,j):
+	
+	(Gii,Hiii)=pack_i(G,H,i)
+	(Gjj,Hjjj)=pack_i(G,H,j)
+	
+	return (Gii,Gjj,Hiii,Hjjj)
+
+
+
+def pack_previous_ijk(G,H,i,j,k):
+	
+	(Gii,Hiii)=	pack_i(G,H,i)
+	(Gjj,Hjjj)=	pack_i(G,H,j)
+	(Gkk,Hkkk)=	pack_i(G,H,k)
+	
+	(Gij,Hiij,Hijj)=pack_ij(G,H,i,j)
+	(Gjk,Hjjk,Hjkk)=pack_ij(G,H,j,k)
+	(Gik,Hiik,Hikk)=pack_ij(G,H,i,k)
+	
+	return (Gii,Gjj,Gkk,Gij,Gjk,Gik,Hiii,Hjjj,Hkkk,Hiij,Hjjk,Hiik,Hijj,Hjkk,Hikk)
+
+
+
+
+####################################
+###	Step Method Loops	####
+####################################
+
+G=dict()
+H=dict()
+
+# First Loop
+for i in range(N_modes):
+	current=(PHI[i],q[i])
+	Combination_i(current,(G,Id(i,i)),*(H,Id(i,i,i)))
+
+
+# Second Loop
+for i in range(N_modes):
+	for j in range(i+1,N_modes):
+		previous=pack_previous_ij(G,H,i,j)
+		current=(PHI[i],q[i],PHI[j],q[j])
+		Combination_ij(current,previous,(G,Id(i,j)),*(H,Id(i,i,j),Id(i,j,j)))
+
+# Third Loop
+for i in range(N_modes):
+	for j in range(i+1,N_modes):
+		for k in range(j+1,N_modes):
+			previous=pack_previous_ijk(G,H,i,j,k)			
+			current=(PHI[i],q[i],PHI[j],q[j],PHI[k],q[k])
+			Combination_ijk(current,previous,(H,Id(i,j,k)))
+
+
+
+
+###############################################################
+########	Second Order Reconstruction Vectors	#######
+###############################################################
+
+#	Equation of the change of coordinates at second order:
+#	x(second) = 1/2 th R R 
+th_tens = np.zeros([N_dofs,N_modes,N_modes])			# quadratic reconstruction tensors in python format
+th = dict()							# quadratic reconstruction tensors in code_aster format
+
+
+# Second Order vectors in physical basis are defined as:
+# 
+# thij = thji =  ( ZG_i + ZG_j )
+
+# with
+
+# the vectors ZG equal to:
+# ZG_i = D_d^(-1).G_ij
+# ZG_j = D_s^(-1).G_ij
+
+# the matrices to be inverted equal to:
+# D_i = {(wi)^2 M - K}
+# D_j = {(wj)^2 M - K}
+
+
+for i in range(N_modes):
+	for j in range(i,N_modes):
+
+		
+		#  D = {(wi)^2 M - K}
+		D=COMB_MATR_ASSE(COMB_R=(
+			_F(	MATR_ASSE=K,	COEF_R=-1.0,),
+			),);
+		
+		# must be stored factorised
+		D=FACTORISER(reuse=D,MATR_ASSE=D, METHODE='MUMPS',PCENT_PIVOT=50);
+		
+		# Solve the system
+		ZG=RESOUDRE(MATR=D, CHAM_NO=G[Id(i,j)],RESI_RELA=tol_quad,)
+		
+		# Compute bar{theta}_ij
+		th[Id(i,j)]=CREA_CHAMP(COMB=(
+			_F(CHAM_GD=	ZG,		COEF_R=+2),
+			),
+			OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+		
+		
+		th_tens[:,i,j]=th[Id(i,j)].EXTR_COMP(topo=1).valeurs		
+		if i != j:			
+			th_tens[:,j,i]=th[Id(i,j)].EXTR_COMP(topo=1).valeurs
+		
+		
+		DETRUIRE(CONCEPT = _F (NOM = D))
+		DETRUIRE(CONCEPT = _F (NOM = ZG))
+
+
+
+###############################################################
+########	Third Order Reduced Dynamics Tensors	#######
+###############################################################
+#
+# Full tensors in physical basis 
+# A[i,j,k]=G(phi[i],th[j,k])
+# AH[i,j,k]=A[i,j,k]+H[i,j,k]
+# AH_modal  = Phi_r.AH
+AH_modal = np.zeros([N_modes,N_modes,N_modes,N_modes])		# CUBIC reduced dynamics tensors in python format (depl)
+
+
+#
+# To extract G(phi[i],th[j,k]) 
+# one must first compute G(phi_i,phi_i), G(th_jk,th_jk)
+# G(phi_i,phi_i) is available from Step method
+# G(th_jk,th_jk) are evaluated with the following loop:
+Gth=dict()
+for j in range(N_modes):
+	for k in range(j,N_modes):				
+		current=(th[Id(j,k)],q[j]*q[k])
+		quadratic=(Gth,'th'+Id(j,k,j,k))
+		Combination_i(current,quadratic)		
+
+
+
+
+# Then one can extract G(phi[i],th[j,k])
+# with the following loop:
+for i in range(N_modes):
+	for j in range(N_modes):
+		for k in range(j,N_modes):
+						
+			current=(PHI[i],q[i],th[Id(j,k)],q[j]*q[k])
+			quadratic=(Gth,'th'+Id(i,j,k))
+			previous=(G[Id(i,i)],Gth['th'+Id(j,k,j,k)],None,None)
+			Combination_ij(current,previous,quadratic)
+
+			
+
+
+# Finally the modal AH can be calculated
+for i in range(N_modes):
+	for j in range(N_modes):
+		for k in range(j,N_modes):
+			# H[i,j,k] is only defined if i>=j>=k
+			# but it is symmetric so H[k,j,i]=H[i,j,k]...
+			# I call here the only H defined 
+			so_ijk=tuple(sorted((i,j,k)))
+			
+			# Ah[i,j,k] = H[so(i,j,k)] + Gth[i,j,k]
+			# Ah[i,k,j] = Ah[i,j,k]
+			AH_ijk = CREA_CHAMP(COMB=(
+				_F(CHAM_GD=	H[Id(*so_ijk)],		COEF_R=1),
+				_F(CHAM_GD=	Gth['th'+Id(i,j,k)],	COEF_R=1),
+				),OPERATION='COMB',TYPE_CHAM='NOEU_DEPL_R')
+			
+			for r_p in range(N_modes):
+				AH_modal[r_p,i,j,k]=np.dot(EigenModes[r_p],AH_ijk.EXTR_COMP(topo=1).valeurs)
+				AH_modal[r_p,i,k,j]=np.dot(EigenModes[r_p],AH_ijk.EXTR_COMP(topo=1).valeurs)
+			
+			DETRUIRE(CONCEPT = _F (NOM = AH_ijk))
+
+
+
+
+
+thMphi = np.zeros([N_modes,N_modes,N_modes])			# quadratic reduced dynamics tensors from theta^T.M.phi
+thKphi = np.zeros([N_modes,N_modes,N_modes])			# quadratic reduced dynamics tensors from theta^T.K.phi
+phiMth = np.zeros([N_modes,N_modes,N_modes])			# quadratic reduced dynamics tensors from phi^T.M.theta
+phiKth = np.zeros([N_modes,N_modes,N_modes])			# quadratic reduced dynamics tensors from phi^T.K.theta
+phiGphiphi = np.zeros([N_modes,N_modes,N_modes])		# quadratic reduced dynamics tensors g = phi^T.G.phi.phi
+thMth  = np.zeros([N_modes,N_modes,N_modes,N_modes])		# CUBIC reduced dynamics tensors from theta^T.M.theta
+thKth  = np.zeros([N_modes,N_modes,N_modes,N_modes])		# CUBIC reduced dynamics tensors from theta^T.K.theta
+thGphiphi  = np.zeros([N_modes,N_modes,N_modes,N_modes])	# CUBIC reduced dynamics tensors from theta^T.G.phi.phi
+
+
+# 
+for i in range(N_modes):
+	for j in range(N_modes):
+		#
+		so_ij=tuple(sorted((i,j)))
+		Mth_ij = PROD_MATR_CHAM(MATR_ASSE=M, CHAM_NO=th[Id(*so_ij)],);
+		Kth_ij = PROD_MATR_CHAM(MATR_ASSE=K, CHAM_NO=th[Id(*so_ij)],);
+		for r_p in range(N_modes):
+			#
+			thMphi[r_p,i,j]=np.dot(th_tens[:,r_p,i],MdotEigenModes[j])
+			thKphi[r_p,i,j]=omega[j]**2*thMphi[r_p,i,j]
+			#
+			phiMth[r_p,i,j]=np.dot(EigenModes[r_p],Mth_ij.EXTR_COMP(topo=1).valeurs)
+			phiKth[r_p,i,j]=omega[r_p]**2*phiMth[r_p,i,j]
+			#
+			phiGphiphi[r_p,i,j]=np.dot(EigenModes[r_p],G[Id(*so_ij)].EXTR_COMP(topo=1).valeurs)
+			#
+			for k in range(N_modes):
+				#
+				thMth[r_p,k,i,j]=np.dot(th_tens[:,r_p,k],Mth_ij.EXTR_COMP(topo=1).valeurs)
+				thKth[r_p,k,i,j]=np.dot(th_tens[:,r_p,k],Kth_ij.EXTR_COMP(topo=1).valeurs)
+				thGphiphi[r_p,k,i,j]=np.dot(th_tens[:,r_p,k],G[Id(*so_ij)].EXTR_COMP(topo=1).valeurs)
+		#
+		DETRUIRE(CONCEPT = _F (NOM = Mth_ij))
+		DETRUIRE(CONCEPT = _F (NOM = Kth_ij))
+
+
+
+
+
+
+Export=dict()
+# Reduced Dynamics First Order
+Export['Kr']=np.diag(omega)**2
+Export['Mr']=np.eye(N_modes)
+# Reduced Dynamics Second Order
+Export['thMphi']=thMphi
+Export['thKphi']=thKphi
+Export['phiMth']=phiMth
+Export['phiKth']=phiKth
+Export['phiGphiphi']=phiGphiphi
+# Reduced Dynamics Third Order
+Export['AH']=AH_modal
+Export['thMth']=thMth
+Export['thKth']=thKth
+Export['thGphiphi']=thGphiphi
+# Reconstruction First Order
+Export['phi']=EigenModes
+Export['Mphi']=MdotEigenModes
+# Reconstruction Second Order
+Export['th']=th_tens
+#
+sio.savemat(output_filename, Export)
+
+
+
+
+
+
+
+
+
+
+
+
+print('Eureka')
+FIN(INFO_RESU='NON')
