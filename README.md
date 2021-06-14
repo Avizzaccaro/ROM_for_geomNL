@@ -15,7 +15,7 @@ Inside each of them:
 
 
 A short guide "HowToRunAstkJob" is included.
-The algorithm of DNF is detailed in the pdf "DNFalgorithm"
+The algorithm of DNF is detailed in the pdf "DirectNormalFormAlgorithm"
 A mesh of a clamped clamped beam (.med file) and some matlab figures with the results are included for verification.
 
 
